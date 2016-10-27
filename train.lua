@@ -48,8 +48,8 @@ cmd:option('-seq_length',50,'number of timesteps to unroll for')
 cmd:option('-batch_size',50,'number of sequences to train on in parallel')
 cmd:option('-max_epochs',50,'number of full passes through the training data')
 cmd:option('-grad_clip',5,'clip gradients at this value')
-cmd:option('-train_frac',0.95,'fraction of data that goes into train set')
-cmd:option('-val_frac',0.05,'fraction of data that goes into validation set')
+cmd:option('-train_frac',0.8,'fraction of data that goes into train set')
+cmd:option('-val_frac',0.1,'fraction of data that goes into validation set')
             -- test_frac will be computed as (1 - train_frac - val_frac)
 cmd:option('-init_from', '', 'initialize network parameters from checkpoint at this path')
 -- bookkeeping
@@ -228,6 +228,9 @@ function eval_split(split_index, max_batches)
     local loss = 0
     local rnn_state = {[0] = init_state}
     
+    local num_correct = 0
+    local total = 0
+
     for i = 1,n do -- iterate over batches in the split
         -- fetch a batch
         local x, y = loader:next_batch(split_index)
@@ -239,6 +242,11 @@ function eval_split(split_index, max_batches)
             rnn_state[t] = {}
             for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end
             prediction = lst[#lst] 
+
+	    y2, i2 = torch.max(prediction, 2)
+            num_correct = num_correct + torch.sum(torch.eq(y[t]:long(), i2))
+            total = total + prediction:size()[1]
+
             loss = loss + clones.criterion[t]:forward(prediction, y[t])
         end
         -- carry over lstm state
@@ -247,7 +255,8 @@ function eval_split(split_index, max_batches)
     end
 
     loss = loss / opt.seq_length / n
-    return loss
+    local error_rate = 1.0 - (num_correct/total)
+    return loss, error_rate
 end
 
 -- do fwd/bwd and return loss, grad_params
@@ -303,6 +312,7 @@ end
 -- start optimization here
 train_losses = {}
 val_losses = {}
+val_errors = {}
 local optim_state = {learningRate = opt.learning_rate, alpha = opt.decay_rate}
 local iterations = opt.max_epochs * loader.ntrain
 local iterations_per_epoch = loader.ntrain
@@ -337,10 +347,11 @@ for i = 1, iterations do
     -- every now and then or on last iteration
     if i % opt.eval_val_every == 0 or i == iterations then
         -- evaluate loss on validation data
-        local val_loss = eval_split(2) -- 2 = validation
+        local val_loss, error_rate = eval_split(2) -- 2 = validation
         val_losses[i] = val_loss
+	val_errors[i] = error_rate
 
-        local savefile = string.format('%s/lm_%s_epoch%.2f_%.4f.t7', opt.checkpoint_dir, opt.savefile, epoch, val_loss)
+        local savefile = string.format('%s/lm_%s_epoch%.2f_%.4f_%.4f.t7', opt.checkpoint_dir, opt.savefile, epoch, val_loss, error_rate)
         print('saving checkpoint to ' .. savefile)
         local checkpoint = {}
         checkpoint.protos = protos
@@ -348,6 +359,8 @@ for i = 1, iterations do
         checkpoint.train_losses = train_losses
         checkpoint.val_loss = val_loss
         checkpoint.val_losses = val_losses
+	checkpoint.val_errors = val_errors
+	checkpoint.val_error = error_rate
         checkpoint.i = i
         checkpoint.epoch = epoch
         checkpoint.vocab = loader.vocab_mapping
